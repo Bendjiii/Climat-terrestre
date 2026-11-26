@@ -1,0 +1,6 @@
+{
+  "name": "Explorateur des climats du monde – Köppen-Geiger",
+  "description": "Carte interactive 2D des 30 zones climatiques mondiales selon la classification de Köppen-Geiger (Beck et al., 2023, période 1991-2020).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
