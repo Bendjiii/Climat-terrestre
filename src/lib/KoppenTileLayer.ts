@@ -3,11 +3,16 @@ import {
   KOPPEN_CLIMATES,
   getClimateRgb,
   type ClimateFamilyCode,
-  type PaletteMode,
 } from '../data/koppenClimates';
+import {
+  getLoadedWorldRaster,
+  loadWorldClimateRaster,
+  lookupWorldClimate,
+  renderMercatorTileBuffer,
+  type WorldClimateRaster,
+} from './koppenWorldRaster';
 
 export interface KoppenLayerOptions extends L.GridLayerOptions {
-  paletteMode?: PaletteMode;
   highlightedCode?: number | null;
   highlightedFamily?: ClimateFamilyCode | null;
   onLoadingStateChange?: (loading: boolean) => void;
@@ -52,47 +57,12 @@ export function isOceanOrNoData(code: number): boolean {
   return code === NO_DATA_CODE || !isValidClimateCode(code);
 }
 
-function wrapLongitude(lng: number): number {
-  return ((((lng + 180) % 360) + 360) % 360) - 180;
-}
-
-function latLngToTilePixel(
-  lat: number,
-  lng: number,
-  z: number
-): { tx: number; ty: number; px: number; py: number } {
-  const n = 2 ** z;
-  const wrappedLng = wrapLongitude(lng);
-  const clampedLat = Math.max(
-    -WEB_MERCATOR_MAX_LAT,
-    Math.min(WEB_MERCATOR_MAX_LAT, lat)
-  );
-  const latRad = (clampedLat * Math.PI) / 180;
-
-  const xFloat = ((wrappedLng + 180) / 360) * n;
-  const yFloat =
-    ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
-
-  const tx = ((Math.floor(xFloat) % n) + n) % n;
-  const ty = Math.min(n - 1, Math.max(0, Math.floor(yFloat)));
-  const px = Math.min(
-    TILE_SIZE - 1,
-    Math.max(0, Math.floor((xFloat - Math.floor(xFloat)) * TILE_SIZE))
-  );
-  const py = Math.min(
-    TILE_SIZE - 1,
-    Math.max(0, Math.floor((yFloat - Math.floor(yFloat)) * TILE_SIZE))
-  );
-
-  return { tx, ty, px, py };
-}
-
 export class KoppenTileLayer extends L.GridLayer {
   private tileDataCache = new Map<string, Uint8Array>();
   private activeTiles = new Map<HTMLCanvasElement, ActiveTileEntry>();
+  private worldRaster: WorldClimateRaster | null = getLoadedWorldRaster();
   private pendingRequests = 0;
   private currentOpacity = 0.82;
-  private paletteMode: PaletteMode = 'natural';
   private highlightedCode: number | null = null;
   private highlightedFamily: ClimateFamilyCode | null = null;
   private onLoadingStateChange?: (loading: boolean) => void;
@@ -111,7 +81,6 @@ export class KoppenTileLayer extends L.GridLayer {
     });
 
     this.currentOpacity = options?.opacity ?? 0.82;
-    this.paletteMode = options?.paletteMode ?? 'natural';
     this.highlightedCode = options?.highlightedCode ?? null;
     this.highlightedFamily = options?.highlightedFamily ?? null;
     this.onLoadingStateChange = options?.onLoadingStateChange;
@@ -201,6 +170,18 @@ export class KoppenTileLayer extends L.GridLayer {
           this.paintTile(entry.canvas, cached);
           entry.canvas.classList.add('leaflet-tile-loaded');
           entry.canvas.style.opacity = '1';
+        } else if (this.worldRaster) {
+          const generated = renderMercatorTileBuffer(
+            this.worldRaster,
+            entry.z,
+            entry.wrappedX,
+            entry.y
+          );
+          this.setCachedTile(cacheKey, generated);
+          entry.data = generated;
+          this.paintTile(entry.canvas, generated);
+          entry.canvas.classList.add('leaflet-tile-loaded');
+          entry.canvas.style.opacity = '1';
         } else if (entry.z === activeZoom) {
           this.clearCanvas(entry.canvas);
         }
@@ -226,20 +207,15 @@ export class KoppenTileLayer extends L.GridLayer {
     this.refreshTiles();
   }
 
-  public setPaletteMode(mode: PaletteMode): void {
-    if (this.paletteMode === mode) {
-      return;
-    }
-    this.paletteMode = mode;
-    this.refreshTiles();
-  }
-
   public async renderViewportToContext(
     ctx: CanvasRenderingContext2D,
     map: L.Map,
     opacity: number
   ): Promise<void> {
     if (opacity <= 0) return;
+
+    const raster = this.worldRaster ?? (await loadWorldClimateRaster());
+    this.worldRaster = raster;
 
     const zoom = map.getZoom();
     const tileZoom = Math.min(12, Math.max(2, Math.round(zoom)));
@@ -258,61 +234,40 @@ export class KoppenTileLayer extends L.GridLayer {
       Math.floor((viewportTopLeft.y + size.y - 1) / screenSize)
     );
 
-    const tileCoords: Array<{ tx: number; ty: number; wrappedX: number }> = [];
-    for (let ty = tyMin; ty <= tyMax; ty++) {
-      for (let tx = txMin; tx <= txMax; tx++) {
-        const wrappedX = ((tx % n) + n) % n;
-        tileCoords.push({ tx, ty, wrappedX });
-      }
-    }
-
-    const tileBuffers = await Promise.all(
-      tileCoords.map(async ({ wrappedX, ty }) => {
-        const key = `${tileZoom}/${wrappedX}/${ty}`;
-        const cached = this.getCachedTile(key);
-        if (cached) return cached;
-
-        try {
-          const res = await fetch(`/api/tiles/${tileZoom}/${wrappedX}/${ty}.bin`);
-          if (!res.ok) return null;
-          const data = new Uint8Array(await res.arrayBuffer());
-          if (data.length === TILE_SIZE * TILE_SIZE) {
-            this.setCachedTile(key, data);
-            return data;
-          }
-        } catch {
-          return null;
-        }
-        return null;
-      })
-    );
-
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = TILE_SIZE;
     tempCanvas.height = TILE_SIZE;
 
     ctx.save();
     ctx.globalAlpha = opacity;
-    for (let i = 0; i < tileCoords.length; i++) {
-      const data = tileBuffers[i];
-      if (!data) continue;
-      const { tx, ty } = tileCoords[i];
-      this.paintTile(tempCanvas, data);
-      const sx = tx * screenSize - viewportTopLeft.x;
-      const sy = ty * screenSize - viewportTopLeft.y;
-      ctx.drawImage(tempCanvas, sx, sy, screenSize, screenSize);
+
+    for (let ty = tyMin; ty <= tyMax; ty++) {
+      for (let tx = txMin; tx <= txMax; tx++) {
+        const wrappedX = ((tx % n) + n) % n;
+        const key = `${tileZoom}/${wrappedX}/${ty}`;
+        let data = this.getCachedTile(key);
+        if (!data) {
+          data = renderMercatorTileBuffer(raster, tileZoom, wrappedX, ty);
+          this.setCachedTile(key, data);
+        }
+        this.paintTile(tempCanvas, data);
+        const sx = tx * screenSize - viewportTopLeft.x;
+        const sy = ty * screenSize - viewportTopLeft.y;
+        ctx.drawImage(tempCanvas, sx, sy, screenSize, screenSize);
+      }
     }
+
     ctx.restore();
   }
 
   /**
-   * Retourne le code climatique Köppen-Geiger (1..30) à la position exacte,
+   * Retourne le code climatique Köppen-Geiger à la position exacte,
    * ou `code: null` sur les océans / zones sans données / valeurs invalides.
    */
   public lookupClimateAtLatLng(
     lat: number,
     lng: number,
-    zoom: number
+    _zoom?: number
   ): ClimateLookupResult {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       return { ready: true, code: null };
@@ -321,27 +276,14 @@ export class KoppenTileLayer extends L.GridLayer {
       return { ready: true, code: null };
     }
 
-    const activeTileZoom = this.getCurrentTileZoom();
-    const baseZoom = Math.min(
-      12,
-      Math.max(2, activeTileZoom ?? Math.round(zoom))
-    );
-
-    for (let z = baseZoom; z >= 2; z--) {
-      const { tx, ty, px, py } = latLngToTilePixel(lat, lng, z);
-      const key = `${z}/${tx}/${ty}`;
-      const data = this.tileDataCache.get(key);
-      if (!data) continue;
-
-      const rawCode = data[py * TILE_SIZE + px] ?? 0;
-      if (!isValidClimateCode(rawCode)) {
-        return { ready: true, code: null };
-      }
-
-      return { ready: true, code: rawCode };
+    const raster = this.worldRaster ?? getLoadedWorldRaster();
+    if (!raster) {
+      return { ready: false, code: null };
     }
 
-    return { ready: false, code: null };
+    this.worldRaster = raster;
+    const code = lookupWorldClimate(raster, lat, lng);
+    return { ready: true, code };
   }
 
   protected override createTile(
@@ -380,10 +322,33 @@ export class KoppenTileLayer extends L.GridLayer {
       if (this.currentOpacity > 0) {
         this.paintTile(canvas, cached);
       }
+      canvas.classList.add('leaflet-tile-loaded');
+      canvas.style.opacity = '1';
       requestAnimationFrame(() => {
         if (controller.signal.aborted) return;
-        canvas.classList.add('leaflet-tile-loaded');
-        canvas.style.opacity = '1';
+        done(undefined, canvas);
+      });
+      return canvas;
+    }
+
+    const loadedRaster = this.worldRaster ?? getLoadedWorldRaster();
+    if (loadedRaster) {
+      this.worldRaster = loadedRaster;
+      const data = renderMercatorTileBuffer(
+        loadedRaster,
+        coords.z,
+        wrappedX,
+        coords.y
+      );
+      this.setCachedTile(cacheKey, data);
+      entry.data = data;
+      if (this.currentOpacity > 0) {
+        this.paintTile(canvas, data);
+      }
+      canvas.classList.add('leaflet-tile-loaded');
+      canvas.style.opacity = '1';
+      requestAnimationFrame(() => {
+        if (controller.signal.aborted) return;
         done(undefined, canvas);
       });
       return canvas;
@@ -391,39 +356,31 @@ export class KoppenTileLayer extends L.GridLayer {
 
     this.incrementPending();
 
-    fetch(`/api/tiles/${coords.z}/${wrappedX}/${coords.y}.bin`, {
-      signal: controller.signal,
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          let errMsg = `Erreur serveur (${res.status})`;
-          try {
-            const json = (await res.json()) as { error?: string };
-            if (json.error) errMsg = json.error;
-          } catch {
-            // Keep HTTP status fallback
-          }
-          throw new Error(errMsg);
-        }
-        return res.arrayBuffer();
-      })
-      .then((buffer) => {
+    loadWorldClimateRaster()
+      .then((raster) => {
         if (controller.signal.aborted) return;
-        const data = new Uint8Array(buffer);
-        if (data.length === TILE_SIZE * TILE_SIZE) {
-          this.setCachedTile(cacheKey, data);
-          entry.data = data;
-          if (this.currentOpacity > 0) {
-            this.paintTile(canvas, data);
-          }
-          canvas.classList.add('leaflet-tile-loaded');
-          canvas.style.opacity = '1';
-          this.onTileError?.(null);
+        this.worldRaster = raster;
+        const data = renderMercatorTileBuffer(
+          raster,
+          coords.z,
+          wrappedX,
+          coords.y
+        );
+        this.setCachedTile(cacheKey, data);
+        entry.data = data;
+        if (this.currentOpacity > 0) {
+          this.paintTile(canvas, data);
         }
+        canvas.classList.add('leaflet-tile-loaded');
+        canvas.style.opacity = '1';
+        this.onTileError?.(null);
         done(undefined, canvas);
       })
       .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') {
+        if (
+          controller.signal.aborted ||
+          (err instanceof Error && err.name === 'AbortError')
+        ) {
           done(undefined, canvas);
           return;
         }
@@ -477,8 +434,6 @@ export class KoppenTileLayer extends L.GridLayer {
 
       this.refreshTiles();
 
-      // Si des tuiles du niveau actif n'ont pas encore été peintes (ex. transformation interrompue
-      // ou réinitialisation de vue), forcer une mise à jour de la grille Leaflet.
       let hasPaintedTileAtTarget = false;
       for (const entry of this.activeTiles.values()) {
         if (entry.z === targetZoom && entry.data) {
@@ -555,8 +510,6 @@ export class KoppenTileLayer extends L.GridLayer {
       const code = data[i];
       const p = i * 4;
 
-      // Vérification explicite : les zones océaniques (code 0), sans données
-      // ou hors des 7 catégories conservées restent strictement transparentes (RGBA = 0, 0, 0, 0).
       if (isOceanOrNoData(code)) {
         pixels[p] = 0;
         pixels[p + 1] = 0;
@@ -582,7 +535,7 @@ export class KoppenTileLayer extends L.GridLayer {
         alpha = matchesCode || matchesFamily ? 245 : 32;
       }
 
-      const [r, g, b] = getClimateRgb(climate, this.paletteMode);
+      const [r, g, b] = getClimateRgb(climate);
       pixels[p] = r;
       pixels[p + 1] = g;
       pixels[p + 2] = b;

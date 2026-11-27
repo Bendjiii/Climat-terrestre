@@ -10,22 +10,12 @@ import {
   YAxis,
 } from 'recharts';
 import { Loader2 } from 'lucide-react';
-
-interface MonthlyNormalPoint {
-  month: string;
-  monthFull: string;
-  tempC: number;
-  precipMm: number;
-}
-
-interface ClimateNormalsResponse {
-  lat: number;
-  lon: number;
-  period: string;
-  annualTempC: number;
-  annualPrecipMm: number;
-  months: MonthlyNormalPoint[];
-}
+import {
+  fetchClimateNormalsClient,
+  getCachedClimateNormals,
+  type ClimateNormalsResponse,
+  type MonthlyNormalPoint,
+} from '../lib/climateNormals';
 
 interface ClimateDiagramChartProps {
   lat: number;
@@ -58,25 +48,27 @@ function SeasonalTooltip({ active, payload }: CustomTooltipProps) {
 }
 
 export function ClimateDiagramChart({ lat, lon }: ClimateDiagramChartProps) {
-  const [data, setData] = useState<ClimateNormalsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cachedInitial = getCachedClimateNormals(lat, lon);
+  const [data, setData] = useState<ClimateNormalsResponse | null>(
+    cachedInitial
+  );
+  const [loading, setLoading] = useState(!cachedInitial);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const cached = getCachedClimateNormals(lat, lon);
+    if (cached) {
+      setData(cached);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     const controller = new AbortController();
     setLoading(true);
     setError(null);
 
-    fetch(
-      `/api/climate-normals?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,
-      { signal: controller.signal }
-    )
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error('Données saisonnières indisponibles');
-        }
-        return (await res.json()) as ClimateNormalsResponse;
-      })
+    fetchClimateNormalsClient(lat, lon, controller.signal)
       .then((json) => {
         if (!controller.signal.aborted) {
           setData(json);
@@ -100,7 +92,7 @@ export function ClimateDiagramChart({ lat, lon }: ClimateDiagramChartProps) {
     <div className="mt-2.5 border-t border-slate-800 pt-2.5">
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <span className="text-[11px] font-semibold text-slate-200">
-          Diagramme saisonnier (1991–2020)
+          Diagramme saisonnier ({data?.period ?? 'normales'})
         </span>
         {data && !loading && (
           <span className="font-mono text-[10px] text-slate-400 tabular-nums">
@@ -210,7 +202,7 @@ export function ClimateDiagramChart({ lat, lon }: ClimateDiagramChartProps) {
                 Précipitations (mm)
               </span>
             </div>
-            <span>ERA5</span>
+            <span>{data.source}</span>
           </div>
         </>
       )}

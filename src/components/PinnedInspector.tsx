@@ -5,7 +5,6 @@ import {
   formatLat,
   formatLon,
   getClimateColor,
-  type PaletteMode,
 } from '../data/koppenClimates';
 import { ClimateDiagramChart } from './ClimateDiagramChart';
 
@@ -19,14 +18,12 @@ export interface PinnedPoint {
 interface PinnedInspectorProps {
   pinned: PinnedPoint | null;
   liveCoords: { lat: number; lon: number; ready: boolean; code: number | null } | null;
-  paletteMode: PaletteMode;
   onClearPinned: () => void;
 }
 
 export function PinnedInspector({
   pinned,
   liveCoords,
-  paletteMode,
   onClearPinned,
 }: PinnedInspectorProps) {
   if (pinned) {
@@ -39,12 +36,12 @@ export function PinnedInspector({
     return (
       <div
         aria-label="Point climatique épinglé"
-        className="legend-scroll fixed bottom-9 left-3 z-[1000] max-h-[calc(100vh-180px)] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-md border border-slate-700/90 bg-slate-950/92 p-3 text-slate-100 shadow-xl backdrop-blur-sm"
+        className="legend-scroll absolute bottom-2 left-3 z-[1000] max-h-[calc(100%-104px)] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-md border border-slate-700/90 bg-slate-950/92 p-3 text-slate-100 shadow-xl backdrop-blur-sm"
       >
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-cyan-300">
             <Crosshair className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            <span>Point sélectionné (1 km)</span>
+            <span>Point sélectionné</span>
           </div>
           <button
             type="button"
@@ -62,7 +59,7 @@ export function PinnedInspector({
 
         {pinned.loading ? (
           <p className="mt-2 text-xs text-slate-400">
-            Lecture de la valeur 1 km…
+            Lecture des données climatiques…
           </p>
         ) : climate && family ? (
           <>
@@ -70,7 +67,7 @@ export function PinnedInspector({
               <div className="flex items-center gap-2">
                 <span
                   className="h-3.5 w-4 shrink-0 rounded-[2px] border border-white/25"
-                  style={{ backgroundColor: getClimateColor(climate, paletteMode) }}
+                  style={{ backgroundColor: getClimateColor(climate) }}
                   aria-hidden="true"
                 />
                 <span className="font-mono text-xs font-semibold text-cyan-300 tabular-nums">
@@ -92,9 +89,7 @@ export function PinnedInspector({
           </>
         ) : (
           <p className="mt-2 border-t border-slate-800 pt-2 text-xs text-slate-400">
-            {pinned.code !== null && pinned.code > 0
-              ? 'Zone hors des 7 catégories climatiques affichées'
-              : 'Aucune donnée climatique disponible'}
+            Zone océanique ou sans données climatiques
           </p>
         )}
       </div>
@@ -111,7 +106,7 @@ export function PinnedInspector({
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none fixed bottom-9 left-3 z-[900] hidden sm:flex items-center gap-3 rounded-md border border-slate-800 bg-slate-950/88 px-3 py-1.5 font-mono text-xs text-slate-300 tabular-nums backdrop-blur-sm"
+      className="pointer-events-none absolute bottom-2 left-3 z-[900] hidden sm:flex items-center gap-3 rounded-md border border-slate-800 bg-slate-950/88 px-3 py-1.5 font-mono text-xs text-slate-300 tabular-nums backdrop-blur-sm"
     >
       <span>{formatLat(liveCoords.lat)}</span>
       <span className="text-slate-600">·</span>
@@ -121,7 +116,7 @@ export function PinnedInspector({
         <span className="flex items-center gap-1.5 text-slate-100">
           <span
             className="inline-block h-2.5 w-2.5 rounded-[2px] border border-white/25"
-            style={{ backgroundColor: getClimateColor(liveClimate, paletteMode) }}
+            style={{ backgroundColor: getClimateColor(liveClimate) }}
           />
           <span className="font-semibold text-cyan-300">{liveClimate.code}</span>
           <span className="font-sans text-[11px] text-slate-300">

@@ -253,11 +253,6 @@ async function queryExactClimateCode(lat: number, lon: number): Promise<number> 
 async function startServer() {
   const app = express();
 
-  // Trigger GeoTIFF preload in background on server boot
-  initializeClimateRaster().catch((err) => {
-    console.error('Erreur initialisation GeoTIFF:', err);
-  });
-
   app.get('/api/status', (_req, res) => {
     res.json({
       status: raster.status,

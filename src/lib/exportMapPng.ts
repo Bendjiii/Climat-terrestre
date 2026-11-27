@@ -6,18 +6,13 @@ import {
   formatLon,
   getClimateColor,
   type ClimateFamilyCode,
-  type PaletteMode,
 } from '../data/koppenClimates';
 import type { PinnedPoint } from '../components/PinnedInspector';
 import type { KoppenTileLayer } from './KoppenTileLayer';
 
-export type ExportBasemapStyle = 'dark' | 'light' | 'osm';
-
 export interface ExportMapOptions {
   map: L.Map;
   koppenLayer: KoppenTileLayer;
-  basemap: ExportBasemapStyle;
-  paletteMode: PaletteMode;
   layerVisible: boolean;
   opacity: number;
   highlightedCode: number | null;
@@ -27,27 +22,8 @@ export interface ExportMapOptions {
 
 const TILE_SIZE = 256;
 
-function getBasemapUrls(
-  basemap: ExportBasemapStyle,
-  z: number,
-  x: number,
-  y: number
-): { base: string; labels?: string } {
-  if (basemap === 'dark') {
-    return {
-      base: `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`,
-      labels: `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/${z}/${y}/${x}`,
-    };
-  }
-  if (basemap === 'light') {
-    return {
-      base: `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/${z}/${y}/${x}`,
-      labels: `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/${z}/${y}/${x}`,
-    };
-  }
-  return {
-    base: `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
-  };
+function getOsmTileUrl(z: number, x: number, y: number): string {
+  return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
 }
 
 async function fetchBitmapTile(url: string): Promise<ImageBitmap | null> {
@@ -61,11 +37,9 @@ async function fetchBitmapTile(url: string): Promise<ImageBitmap | null> {
   }
 }
 
-async function renderExternalTileLayerToContext(
+async function renderOsmTileLayerToContext(
   ctx: CanvasRenderingContext2D,
-  map: L.Map,
-  basemap: ExportBasemapStyle,
-  which: 'base' | 'labels'
+  map: L.Map
 ): Promise<void> {
   const zoom = map.getZoom();
   const tileZoom = Math.min(16, Math.max(2, Math.round(zoom)));
@@ -93,9 +67,7 @@ async function renderExternalTileLayerToContext(
   for (let ty = tyMin; ty <= tyMax; ty++) {
     for (let tx = txMin; tx <= txMax; tx++) {
       const wrappedX = ((tx % n) + n) % n;
-      const urls = getBasemapUrls(basemap, tileZoom, wrappedX, ty);
-      const url = which === 'base' ? urls.base : urls.labels;
-      if (!url) continue;
+      const url = getOsmTileUrl(tileZoom, wrappedX, ty);
       tasks.push({ tx, ty, promise: fetchBitmapTile(url) });
     }
   }
@@ -119,8 +91,6 @@ export async function exportMapViewToPng(
   const {
     map,
     koppenLayer,
-    basemap,
-    paletteMode,
     layerVisible,
     opacity,
     highlightedCode,
@@ -173,7 +143,7 @@ export async function exportMapViewToPng(
   ctx.fillStyle = '#94a3b8';
   ctx.font = '400 12px "IBM Plex Sans", system-ui, sans-serif';
   ctx.fillText(
-    'Classification climatique (1991–2020) · Données : Beck et al. (2023), 1 km',
+    'Classification climatique de Köppen-Geiger (1991–2020)',
     padding,
     headerHeight / 2 + 12
   );
@@ -197,20 +167,15 @@ export async function exportMapViewToPng(
     throw new Error('Contexte carte indisponible.');
   }
 
-  mapCtx.fillStyle = basemap === 'dark' ? '#0b111b' : '#dfe7ef';
+  mapCtx.fillStyle = '#dfe7ef';
   mapCtx.fillRect(0, 0, mapSize.x, mapSize.y);
 
-  // 1. Fond de carte
-  await renderExternalTileLayerToContext(mapCtx, map, basemap, 'base');
+  // 1. Fond de carte OpenStreetMap
+  await renderOsmTileLayerToContext(mapCtx, map);
 
   // 2. Couche climatique Köppen-Geiger
   if (layerVisible) {
     await koppenLayer.renderViewportToContext(mapCtx, map, opacity);
-  }
-
-  // 3. Étiquettes cartographiques au-dessus de la couche climatique
-  if (basemap !== 'osm') {
-    await renderExternalTileLayerToContext(mapCtx, map, basemap, 'labels');
   }
 
   // 4. Point épinglé éventuel
@@ -256,7 +221,7 @@ export async function exportMapViewToPng(
   const targetMapH = totalHeight - mapY - padding;
 
   ctx.save();
-  ctx.fillStyle = basemap === 'dark' ? '#0b111b' : '#dfe7ef';
+  ctx.fillStyle = '#dfe7ef';
   ctx.fillRect(mapX, mapY, mapWidth, targetMapH);
 
   // Centrer si mapSize est plus petit que l'espace réservé
@@ -297,22 +262,17 @@ export async function exportMapViewToPng(
   ctx.fillStyle = '#f8fafc';
   ctx.font = '600 14px "IBM Plex Sans", system-ui, sans-serif';
   ctx.textBaseline = 'top';
-  ctx.fillText('Zones climatiques essentielles', legendX + 14, legendY + 12);
+  ctx.fillText('Zones climatiques', legendX + 14, legendY + 12);
 
-  const paletteLabel =
-    paletteMode === 'natural'
-      ? 'Palette : Couleurs adaptées au climat'
-      : 'Palette : Standard Köppen-Geiger';
   ctx.fillStyle = '#94a3b8';
   ctx.font = '400 11px "IBM Plex Sans", system-ui, sans-serif';
-  ctx.fillText(paletteLabel, legendX + 14, legendY + 31);
+  ctx.fillText('8 grands climats · Période 1991–2020', legendX + 14, legendY + 31);
 
   ctx.fillStyle = '#1e293b';
   ctx.fillRect(legendX + 14, legendY + 49, legendWidth - 28, 1);
 
-  // Espacement généreux et lisible pour les 7 grands climats essentiels
-  const contentTop = legendY + 66;
-  const rowStep = 64;
+  const contentTop = legendY + 62;
+  const rowStep = 58;
   const maxDescWidth = legendWidth - 58;
 
   let cursorY = contentTop;
@@ -325,7 +285,7 @@ export async function exportMapViewToPng(
     if (isDimmed) ctx.globalAlpha = 0.32;
 
     const swatchY = cursorY + 4;
-    ctx.fillStyle = getClimateColor(climate, paletteMode);
+    ctx.fillStyle = getClimateColor(climate);
     ctx.fillRect(legendX + 16, swatchY, 18, 13);
     ctx.strokeStyle = 'rgba(255,255,255,0.28)';
     ctx.lineWidth = 1;
@@ -366,7 +326,7 @@ export async function exportMapViewToPng(
   ctx.font = '400 10px "IBM Plex Sans", system-ui, sans-serif';
   ctx.textBaseline = 'bottom';
   ctx.fillText(
-    'Fonds : Esri / OpenStreetMap · Climat : Beck et al. (2023)',
+    'Fond : OpenStreetMap · Classification de Köppen-Geiger',
     legendX + 14,
     legendY + legendH - 10
   );

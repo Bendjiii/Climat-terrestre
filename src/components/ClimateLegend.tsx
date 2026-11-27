@@ -3,13 +3,11 @@ import {
   ESSENTIAL_CLIMATES,
   getClimateColor,
   type ClimateFamilyCode,
-  type PaletteMode,
 } from '../data/koppenClimates';
 
 interface ClimateLegendProps {
   isOpen: boolean;
   onToggleOpen: () => void;
-  paletteMode: PaletteMode;
   highlightedCode: number | null;
   highlightedFamily: ClimateFamilyCode | null;
   onSelectCode: (code: number | null) => void;
@@ -19,7 +17,6 @@ interface ClimateLegendProps {
 export function ClimateLegend({
   isOpen,
   onToggleOpen,
-  paletteMode,
   highlightedCode,
   highlightedFamily,
   onSelectCode,
@@ -30,7 +27,7 @@ export function ClimateLegend({
   return (
     <aside
       aria-label="Légende des zones climatiques essentielles"
-      className="fixed right-3 bottom-9 z-[1000] flex max-h-[calc(100vh-156px)] w-[300px] max-w-[calc(100vw-24px)] flex-col rounded-md border border-slate-700/90 bg-slate-950/92 text-slate-100 shadow-xl backdrop-blur-sm"
+      className="absolute right-3 bottom-2 z-[1000] flex max-h-[calc(100%-80px)] w-[300px] max-w-[calc(100vw-24px)] flex-col rounded-md border border-slate-700/90 bg-slate-950/92 text-slate-100 shadow-xl backdrop-blur-sm"
     >
       <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3.5 py-2.5">
         <div className="min-w-0">
@@ -100,7 +97,7 @@ export function ClimateLegend({
                   <span
                     className="h-3.5 w-4 shrink-0 rounded-[2px] border border-white/25"
                     style={{
-                      backgroundColor: getClimateColor(climate, paletteMode),
+                      backgroundColor: getClimateColor(climate),
                     }}
                     aria-hidden="true"
                   />

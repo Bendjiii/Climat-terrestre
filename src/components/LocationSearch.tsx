@@ -1,16 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, MapPin, Search, X } from 'lucide-react';
 import { formatLat, formatLon } from '../data/koppenClimates';
+import {
+  searchLocationsClient,
+  type GeocodedLocation,
+} from '../lib/geocoding';
 
-export interface GeocodedLocation {
-  id: string;
-  name: string;
-  subtitle: string;
-  lat: number;
-  lon: number;
-  kind: 'country' | 'region' | 'city' | 'place';
-  zoom: number;
-}
+export type { GeocodedLocation };
 
 interface LocationSearchProps {
   onSelectLocation: (location: GeocodedLocation) => void;
@@ -49,20 +45,7 @@ export function LocationSearch({ onSelectLocation }: LocationSearchProps) {
       setSearchError(null);
 
       try {
-        const res = await fetch(
-          `/api/geocode?q=${encodeURIComponent(trimmed)}`,
-          { signal: controller.signal }
-        );
-        const data = (await res.json()) as {
-          results?: GeocodedLocation[];
-          error?: string;
-        };
-
-        if (!res.ok) {
-          throw new Error(data.error || 'Recherche impossible.');
-        }
-
-        const items = data.results ?? [];
+        const items = await searchLocationsClient(trimmed, controller.signal);
         if (controller.signal.aborted) return;
 
         if (autoPickFirst && items.length > 0) {

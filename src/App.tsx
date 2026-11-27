@@ -7,6 +7,8 @@ import {
   EyeOff,
   Globe,
   Loader2,
+  Maximize2,
+  Minimize2,
   Minus,
   Plus,
   RefreshCw,
@@ -18,30 +20,40 @@ import {
   type GeocodedLocation,
 } from './components/LocationSearch';
 import { PinnedInspector, type PinnedPoint } from './components/PinnedInspector';
-import type { ClimateFamilyCode, PaletteMode } from './data/koppenClimates';
+import type { ClimateFamilyCode } from './data/koppenClimates';
 import { KoppenTileLayer } from './lib/KoppenTileLayer';
+import {
+  getClimateNormalsCellKey,
+  prefetchClimateNormals,
+} from './lib/climateNormals';
 import { exportMapViewToPng } from './lib/exportMapPng';
-
-type BasemapStyle = 'dark' | 'light' | 'osm';
-
-interface ApiStatusResponse {
-  status: 'loading' | 'ready' | 'error';
-  errorMessage?: string | null;
-}
+import { loadWorldClimateRaster } from './lib/koppenWorldRaster';
 
 const WORLD_CENTER: L.LatLngExpression = [15, 0];
 const WORLD_ZOOM = 2;
 
+function stopMapAnimations(map: L.Map): void {
+  const internal = map as unknown as {
+    _stop?: () => void;
+    _animatingZoom?: boolean;
+    _mapPane?: HTMLElement;
+    _tempFireZoomEvent?: boolean;
+  };
+  internal._stop?.();
+  if (internal._animatingZoom) {
+    internal._animatingZoom = false;
+    delete internal._tempFireZoomEvent;
+    internal._mapPane?.classList.remove('leaflet-zoom-anim');
+  }
+}
+
 export default function App() {
+  const appRootRef = useRef<HTMLDivElement | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const koppenLayerRef = useRef<KoppenTileLayer | null>(null);
-  const baseLayerRef = useRef<L.TileLayer | null>(null);
-  const labelsLayerRef = useRef<L.TileLayer | null>(null);
   const pinnedMarkerRef = useRef<L.CircleMarker | null>(null);
 
-  const [basemap, setBasemap] = useState<BasemapStyle>('dark');
-  const [paletteMode, setPaletteMode] = useState<PaletteMode>('natural');
   const [layerVisible, setLayerVisible] = useState(true);
   const [opacity, setOpacity] = useState(0.82);
   const [legendOpen, setLegendOpen] = useState(() =>
@@ -51,66 +63,61 @@ export default function App() {
   const [highlightedFamily, setHighlightedFamily] =
     useState<ClimateFamilyCode | null>(null);
 
-  const [serverReady, setServerReady] = useState(false);
+  const [dataReady, setDataReady] = useState(false);
   const [tilesLoading, setTilesLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const [hover, setHover] = useState<HoverReadout | null>(null);
   const [pinned, setPinned] = useState<PinnedPoint | null>(null);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const [immersiveFallback, setImmersiveFallback] = useState(false);
   const [viewport, setViewport] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1440,
     height: typeof window !== 'undefined' ? window.innerHeight : 900,
   }));
 
-  const checkServerStatus = useCallback(async () => {
+  const isFullscreen = nativeFullscreen || immersiveFallback;
+  const hoverCoordsRef = useRef<{ lat: number; lon: number } | null>(null);
+  const hoverCellKey =
+    hover && hover.ready && hover.code !== null && hover.code > 0
+      ? getClimateNormalsCellKey(hover.lat, hover.lon)
+      : null;
+
+  hoverCoordsRef.current = hoverCellKey && hover
+    ? { lat: hover.lat, lon: hover.lon }
+    : null;
+
+  useEffect(() => {
+    if (!hoverCellKey) return;
+    const timerId = window.setTimeout(() => {
+      const coords = hoverCoordsRef.current;
+      if (coords) {
+        prefetchClimateNormals(coords.lat, coords.lon);
+      }
+    }, 350);
+    return () => window.clearTimeout(timerId);
+  }, [hoverCellKey]);
+
+  const loadClimateData = useCallback(async () => {
     try {
-      const res = await fetch('/api/status');
-      if (!res.ok) {
-        throw new Error(`Statut serveur indisponible (HTTP ${res.status})`);
-      }
-      const data = (await res.json()) as ApiStatusResponse;
-      if (data.status === 'ready') {
-        setServerReady(true);
-        setErrorMessage(null);
-      } else if (data.status === 'error') {
-        setServerReady(false);
-        setErrorMessage(
-          data.errorMessage ||
-            'Erreur lors du chargement des données climatiques Beck et al. (2023).'
-        );
-      } else {
-        setServerReady(false);
-      }
+      await loadWorldClimateRaster();
+      setDataReady(true);
+      setErrorMessage(null);
+      koppenLayerRef.current?.refreshTiles();
     } catch (err) {
+      setDataReady(false);
       setErrorMessage(
         err instanceof Error
           ? err.message
-          : 'Impossible de joindre le serveur de données climatiques.'
+          : 'Erreur lors du chargement des données climatiques.'
       );
     }
   }, []);
 
   useEffect(() => {
-    let active = true;
-    let timer: number | undefined;
-
-    const poll = async () => {
-      await checkServerStatus();
-      if (active) {
-        timer = window.setTimeout(poll, 1200);
-      }
-    };
-
-    if (!serverReady) {
-      poll();
-    }
-
-    return () => {
-      active = false;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [checkServerStatus, serverReady]);
+    void loadClimateData();
+  }, [loadClimateData]);
 
   useEffect(() => {
     const onResize = () => {
@@ -119,9 +126,39 @@ export default function App() {
         height: window.innerHeight,
       });
     };
+    const onFullscreenChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const active = Boolean(
+        document.fullscreenElement ?? doc.webkitFullscreenElement
+      );
+      setNativeFullscreen(active);
+      if (active) {
+        setImmersiveFallback(false);
+      }
+      onResize();
+    };
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!immersiveFallback) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setImmersiveFallback(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [immersiveFallback]);
 
   const pinAndInspectPoint = useCallback(async (lat: number, lon: number) => {
     const map = mapRef.current;
@@ -142,29 +179,31 @@ export default function App() {
       }).addTo(map);
     }
 
-    const { code: instantCode } = koppenLayer.lookupClimateAtLatLng(
-      lat,
-      lon,
-      map.getZoom()
-    );
-    setPinned({ lat, lon, code: instantCode, loading: true });
+    const initial = koppenLayer.lookupClimateAtLatLng(lat, lon, map.getZoom());
+    if (initial.ready) {
+      setPinned({ lat, lon, code: initial.code, loading: false });
+      return;
+    }
 
+    setPinned({ lat, lon, code: null, loading: true });
     try {
-      const res = await fetch(
-        `/api/climate?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`
+      await loadWorldClimateRaster();
+      const resolved = koppenLayer.lookupClimateAtLatLng(
+        lat,
+        lon,
+        map.getZoom()
       );
-      if (!res.ok) throw new Error('Point indisponible');
-      const data = (await res.json()) as { code: number | null };
-      setPinned({ lat, lon, code: data.code, loading: false });
+      setPinned({ lat, lon, code: resolved.code, loading: false });
     } catch {
       setPinned((prev) => (prev ? { ...prev, loading: false } : null));
     }
   }, []);
 
   useEffect(() => {
-    if (!mapContainerRef.current || mapRef.current) return;
+    const containerEl = mapContainerRef.current;
+    if (!containerEl || mapRef.current) return;
 
-    const map = L.map(mapContainerRef.current, {
+    const map = L.map(containerEl, {
       center: WORLD_CENTER,
       zoom: WORLD_ZOOM,
       minZoom: 2,
@@ -173,16 +212,12 @@ export default function App() {
       zoomControl: false,
       attributionControl: true,
       fadeAnimation: false,
-      maxBounds: [
-        [-85, -1800],
-        [85, 1800],
-      ],
-      maxBoundsViscosity: 0.85,
     });
 
-    const labelsPane = map.createPane('labelsPane');
-    labelsPane.style.zIndex = '450';
-    labelsPane.style.pointerEvents = 'none';
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19,
+    }).addTo(map);
 
     const climatePane = map.createPane('climatePane');
     climatePane.style.zIndex = '250';
@@ -190,7 +225,6 @@ export default function App() {
     const koppenLayer = new KoppenTileLayer({
       pane: 'climatePane',
       opacity: 0.82,
-      paletteMode: 'natural',
       onLoadingStateChange: (loading) => setTilesLoading(loading),
       onTileError: (msg) => {
         if (msg) setErrorMessage(msg);
@@ -228,89 +262,66 @@ export default function App() {
       setHover(null);
     });
 
+    map.on('moveend', () => {
+      const center = map.getCenter();
+      if (Math.abs(center.lat) > 82) {
+        const clampedLat = Math.max(-82, Math.min(82, center.lat));
+        map.panTo([clampedLat, center.lng], {
+          animate: false,
+          noMoveStart: true,
+        });
+      }
+    });
+
     map.on('click', (e: L.LeafletMouseEvent) => {
       void pinAndInspectPoint(e.latlng.lat, e.latlng.lng);
     });
+
+    const syncMapSize = () => {
+      map.invalidateSize({ animate: false });
+      koppenLayer.refreshTiles();
+    };
+
+    let rafResizeId: number | null = null;
+    const scheduleSyncMapSize = () => {
+      syncMapSize();
+      if (rafResizeId !== null) {
+        window.cancelAnimationFrame(rafResizeId);
+      }
+      rafResizeId = window.requestAnimationFrame(() => {
+        rafResizeId = null;
+        syncMapSize();
+      });
+    };
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            scheduleSyncMapSize();
+          })
+        : null;
+    resizeObserver?.observe(containerEl);
+    document.addEventListener('fullscreenchange', scheduleSyncMapSize);
+    document.addEventListener('webkitfullscreenchange', scheduleSyncMapSize);
+    window.addEventListener('resize', scheduleSyncMapSize);
 
     mapRef.current = map;
     koppenLayerRef.current = koppenLayer;
 
     return () => {
+      if (rafResizeId !== null) {
+        window.cancelAnimationFrame(rafResizeId);
+      }
+      resizeObserver?.disconnect();
+      document.removeEventListener('fullscreenchange', scheduleSyncMapSize);
+      document.removeEventListener('webkitfullscreenchange', scheduleSyncMapSize);
+      window.removeEventListener('resize', scheduleSyncMapSize);
       map.remove();
       mapRef.current = null;
       koppenLayerRef.current = null;
-      baseLayerRef.current = null;
-      labelsLayerRef.current = null;
       pinnedMarkerRef.current = null;
     };
   }, [pinAndInspectPoint]);
-
-  // Update basemap layers whenever basemap style changes
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    if (baseLayerRef.current) {
-      map.removeLayer(baseLayerRef.current);
-      baseLayerRef.current = null;
-    }
-    if (labelsLayerRef.current) {
-      map.removeLayer(labelsLayerRef.current);
-      labelsLayerRef.current = null;
-    }
-
-    const worldTileBounds: L.LatLngBoundsExpression = [
-      [-85.05112878, -3600],
-      [85.05112878, 3600],
-    ];
-
-    if (basemap === 'dark') {
-      baseLayerRef.current = L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-        {
-          attribution: '&copy; Esri &copy; OpenStreetMap',
-          maxZoom: 16,
-          bounds: worldTileBounds,
-        }
-      ).addTo(map);
-
-      labelsLayerRef.current = L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-        {
-          maxZoom: 16,
-          pane: 'labelsPane',
-          bounds: worldTileBounds,
-        }
-      ).addTo(map);
-    } else if (basemap === 'light') {
-      baseLayerRef.current = L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-        {
-          attribution: '&copy; Esri &copy; OpenStreetMap',
-          maxZoom: 16,
-          bounds: worldTileBounds,
-        }
-      ).addTo(map);
-
-      labelsLayerRef.current = L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-        {
-          maxZoom: 16,
-          pane: 'labelsPane',
-          bounds: worldTileBounds,
-        }
-      ).addTo(map);
-    } else {
-      baseLayerRef.current = L.tileLayer(
-        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        {
-          attribution: '&copy; OpenStreetMap contributors',
-          maxZoom: 19,
-          bounds: worldTileBounds,
-        }
-      ).addTo(map);
-    }
-  }, [basemap]);
 
   // Sync climate layer visibility & opacity
   useEffect(() => {
@@ -339,11 +350,6 @@ export default function App() {
     );
   }, [highlightedCode, highlightedFamily]);
 
-  // Sync climate color palette mode
-  useEffect(() => {
-    koppenLayerRef.current?.setPaletteMode(paletteMode);
-  }, [paletteMode]);
-
   const handleSelectLocation = useCallback(
     (loc: GeocodedLocation) => {
       const map = mapRef.current;
@@ -355,7 +361,7 @@ export default function App() {
         typeof window !== 'undefined' &&
         window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      map.stop();
+      stopMapAnimations(map);
       if (prefersReducedMotion) {
         map.setView([clampedLat, loc.lon], targetZoom, { animate: false });
       } else {
@@ -380,14 +386,16 @@ export default function App() {
     if (!map) return;
 
     setHover(null);
-    map.stop();
+    stopMapAnimations(map);
+    map.invalidateSize({ animate: false });
     map.setView(WORLD_CENTER, WORLD_ZOOM, { animate: false });
 
     const layer = koppenLayerRef.current;
     if (layer && layerVisible) {
-      requestAnimationFrame(() => {
-        layer.setOpacity(opacity);
-      });
+      if (!map.hasLayer(layer)) {
+        layer.addTo(map);
+      }
+      layer.resetAndShow(opacity);
     }
   };
 
@@ -410,8 +418,6 @@ export default function App() {
       await exportMapViewToPng({
         map,
         koppenLayer,
-        basemap,
-        paletteMode,
         layerVisible,
         opacity,
         highlightedCode,
@@ -429,82 +435,77 @@ export default function App() {
     }
   };
 
-  const isLoadingData = !serverReady || tilesLoading;
+  const handleToggleFullscreen = useCallback(async () => {
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    const fsEl =
+      document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+
+    if (fsEl) {
+      try {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if (doc.webkitExitFullscreen) {
+          await doc.webkitExitFullscreen();
+        }
+      } catch {
+        // Ignore exit errors
+      }
+      setImmersiveFallback(false);
+      return;
+    }
+
+    if (immersiveFallback) {
+      setImmersiveFallback(false);
+      return;
+    }
+
+    const target = appRootRef.current as
+      | (HTMLDivElement & {
+          webkitRequestFullscreen?: () => Promise<void> | void;
+        })
+      | null;
+
+    if (target) {
+      try {
+        if (target.requestFullscreen) {
+          await target.requestFullscreen();
+          return;
+        }
+        if (target.webkitRequestFullscreen) {
+          await target.webkitRequestFullscreen();
+          return;
+        }
+      } catch {
+        // Fallback when Fullscreen API is restricted (e.g. iframe)
+      }
+    }
+
+    setImmersiveFallback(true);
+  }, [immersiveFallback]);
+
+  const isLoadingData = !dataReady || tilesLoading;
 
   return (
-    <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-[#090d16] text-slate-100">
+    <div
+      ref={appRootRef}
+      className="relative flex h-full w-full flex-col overflow-hidden bg-[#090d16] text-slate-100"
+    >
       {/* Bandeau supérieur */}
+      {!immersiveFallback && (
       <header className="z-[1050] flex h-12 shrink-0 items-center justify-between gap-4 border-b border-slate-800 bg-slate-950/95 px-4">
         <div className="flex min-w-0 items-baseline gap-3">
           <h1 className="text-sm sm:text-base font-semibold tracking-tight text-white whitespace-nowrap truncate">
             Explorateur des climats du monde – Köppen-Geiger
           </h1>
           <span className="hidden lg:inline text-xs text-slate-400 whitespace-nowrap shrink-0">
-            Période 1991–2020 · Beck et al. (2023)
+            Période 1991–2020 · Classification de Köppen-Geiger
           </span>
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
-          {/* Palette switcher */}
-          <div
-            role="group"
-            aria-label="Palette de couleurs"
-            className="flex items-center rounded border border-slate-800 bg-slate-900 p-0.5"
-          >
-            {(
-              [
-                ['natural', 'Climat'],
-                ['beck', 'Beck'],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setPaletteMode(key)}
-                title={
-                  key === 'natural'
-                    ? 'Couleurs naturelles adaptées à chaque climat'
-                    : 'Palette officielle de Beck et al. (2023)'
-                }
-                className={`rounded-xs px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                  paletteMode === key
-                    ? 'bg-slate-800 text-cyan-300'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {/* Basemap switcher */}
-          <div
-            role="group"
-            aria-label="Fond de carte"
-            className="hidden sm:flex items-center rounded border border-slate-800 bg-slate-900 p-0.5"
-          >
-            {(
-              [
-                ['dark', 'Sombre'],
-                ['light', 'Clair'],
-                ['osm', 'OSM'],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setBasemap(key)}
-                className={`rounded-xs px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                  basemap === key
-                    ? 'bg-slate-800 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
           {/* Opacity control */}
           <div className="hidden md:flex items-center gap-2 rounded border border-slate-800 bg-slate-900 px-2.5 py-1">
             <label
@@ -548,7 +549,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleExportPng}
-            disabled={exporting || !serverReady}
+            disabled={exporting || !dataReady}
             title="Exporter la vue actuelle avec légende au format PNG"
             className="inline-flex h-8 items-center gap-1.5 rounded border border-cyan-500/40 bg-cyan-500/15 px-2.5 text-xs font-medium text-cyan-200 transition-colors hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-cyan-400 whitespace-nowrap shrink-0"
           >
@@ -561,8 +562,42 @@ export default function App() {
               {exporting ? 'Export…' : 'Exporter PNG'}
             </span>
           </button>
+
+          {/* Fullscreen toggle */}
+          <button
+            type="button"
+            onClick={() => void handleToggleFullscreen()}
+            aria-pressed={isFullscreen}
+            aria-label={
+              isFullscreen
+                ? 'Quitter le mode plein écran'
+                : 'Passer en mode plein écran'
+            }
+            title={
+              isFullscreen
+                ? 'Quitter le mode plein écran (Échap)'
+                : 'Mode plein écran'
+            }
+            className="inline-flex h-8 items-center gap-1.5 rounded border border-slate-700 bg-slate-900 px-2.5 text-xs font-medium text-slate-200 transition-colors hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-cyan-400 whitespace-nowrap shrink-0"
+          >
+            {isFullscreen ? (
+              <Minimize2
+                className="h-3.5 w-3.5 text-cyan-400"
+                aria-hidden="true"
+              />
+            ) : (
+              <Maximize2
+                className="h-3.5 w-3.5 text-slate-300"
+                aria-hidden="true"
+              />
+            )}
+            <span className="hidden xl:inline">
+              {isFullscreen ? 'Quitter' : 'Plein écran'}
+            </span>
+          </button>
         </div>
       </header>
+      )}
 
       {/* Zone cartographique principale */}
       <main className="relative flex-1 overflow-hidden">
@@ -573,7 +608,7 @@ export default function App() {
         />
 
         {/* Contrôles de zoom et vue mondiale */}
-        <div className="fixed top-15 left-3 z-[1000] flex w-9 flex-col gap-1.5">
+        <div className="absolute top-3 left-3 z-[1000] flex flex-col gap-1.5">
           <div className="flex w-9 flex-col overflow-hidden rounded-md border border-slate-700/90 bg-slate-950/92 shadow-lg backdrop-blur-sm">
             <button
               type="button"
@@ -603,10 +638,23 @@ export default function App() {
               <Globe className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
+
+          {immersiveFallback && (
+            <button
+              type="button"
+              onClick={() => void handleToggleFullscreen()}
+              aria-label="Quitter le mode plein écran"
+              title="Quitter le mode plein écran (Échap)"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-700/90 bg-slate-950/92 px-2.5 text-xs font-medium text-cyan-300 shadow-lg backdrop-blur-sm transition-colors hover:bg-slate-800 hover:text-white focus-visible:outline-2 focus-visible:outline-cyan-400 whitespace-nowrap"
+            >
+              <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Quitter</span>
+            </button>
+          )}
         </div>
 
         {/* Barre de recherche et notifications en haut à droite */}
-        <div className="fixed top-15 right-3 z-[1010] flex w-[300px] max-w-[calc(100vw-60px)] flex-col gap-2">
+        <div className="absolute top-3 right-3 z-[1010] flex w-[300px] max-w-[calc(100vw-60px)] flex-col gap-2">
           <LocationSearch onSelectLocation={handleSelectLocation} />
 
           {isLoadingData && !errorMessage && (
@@ -619,8 +667,8 @@ export default function App() {
                 aria-hidden="true"
               />
               <span>
-                {!serverReady
-                  ? 'Préparation des données climatiques (1991–2020)…'
+                {!dataReady
+                  ? 'Chargement des données climatiques (1991–2020)…'
                   : 'Chargement des tuiles climatiques…'}
               </span>
             </div>
@@ -640,7 +688,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setErrorMessage(null);
-                  checkServerStatus();
+                  void loadClimateData();
                   koppenLayerRef.current?.redraw();
                 }}
                 className="inline-flex h-7 items-center gap-1 rounded border border-rose-500/40 bg-rose-500/15 px-2 text-[11px] font-medium text-rose-100 hover:bg-rose-500/25 focus-visible:outline-2 focus-visible:outline-rose-400 whitespace-nowrap shrink-0"
@@ -657,7 +705,6 @@ export default function App() {
           hover={hover}
           viewportWidth={viewport.width}
           viewportHeight={viewport.height}
-          paletteMode={paletteMode}
         />
 
         {/* Lecture coordonnée en bas à gauche / Point épinglé */}
@@ -673,7 +720,6 @@ export default function App() {
                 }
               : null
           }
-          paletteMode={paletteMode}
           onClearPinned={handleClearPinned}
         />
 
@@ -681,7 +727,6 @@ export default function App() {
         <ClimateLegend
           isOpen={legendOpen}
           onToggleOpen={() => setLegendOpen((o) => !o)}
-          paletteMode={paletteMode}
           highlightedCode={highlightedCode}
           highlightedFamily={highlightedFamily}
           onSelectCode={setHighlightedCode}
@@ -690,14 +735,16 @@ export default function App() {
       </main>
 
       {/* Pied de page scientifique discret */}
+      {!immersiveFallback && (
       <footer className="z-[1050] flex h-7 shrink-0 items-center justify-between gap-4 border-t border-slate-800 bg-slate-950 px-4 text-[11px] text-slate-400">
         <span className="truncate">
-          Données climatiques : Beck et al. (2023), classification de Köppen-Geiger (1991–2020, résolution 1 km).
+          Classification climatique de Köppen-Geiger (période 1991–2020, grille mondiale allégée).
         </span>
         <span className="hidden md:inline whitespace-nowrap shrink-0 text-slate-500">
           Cliquer sur la carte pour épingler un point
         </span>
       </footer>
+      )}
     </div>
   );
 }

@@ -4,7 +4,6 @@ import {
   formatLat,
   formatLon,
   getClimateColor,
-  type PaletteMode,
 } from '../data/koppenClimates';
 
 export interface HoverReadout {
@@ -20,14 +19,12 @@ interface ClimateTooltipProps {
   hover: HoverReadout | null;
   viewportWidth: number;
   viewportHeight: number;
-  paletteMode: PaletteMode;
 }
 
 export function ClimateTooltip({
   hover,
   viewportWidth,
   viewportHeight,
-  paletteMode,
 }: ClimateTooltipProps) {
   if (!hover) return null;
 
@@ -65,7 +62,7 @@ export function ClimateTooltip({
           <div className="flex items-start gap-2.5">
             <span
               className="mt-0.5 h-4 w-4 shrink-0 rounded-xs border border-white/30"
-              style={{ backgroundColor: getClimateColor(climate, paletteMode) }}
+              style={{ backgroundColor: getClimateColor(climate) }}
               aria-hidden="true"
             />
             <div className="min-w-0 flex-1">
